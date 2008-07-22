@@ -41,6 +41,7 @@ char util_rcsid[] =
 
 #include <stdarg.h>
 #include <sys/utsname.h>
+#include <sys/time.h>
 
 #ifdef AUTHENTICATE
 #include <libtelnet/auth.h>
@@ -48,34 +49,19 @@ char util_rcsid[] =
 
 #include "telnetd.h"
 
-/*
- * utility functions performing io related tasks
- */
+struct buflist {
+	struct buflist *next;
+	char *buf;
+	size_t len;
+};
 
-void
-netoprintf(const char *fmt, ...)
-{
-   int len, maxsize;
-   va_list ap;
-   int done=0;
-
-   while (!done) {
-      maxsize = sizeof(netobuf) - (nfrontp - netobuf);
-
-      va_start(ap, fmt);
-      len = vsnprintf(nfrontp, maxsize, fmt, ap);
-      va_end(ap);
-
-      if (len<0 || len==maxsize) {
-	 /* didn't fit */
-	 netflush();
-      }
-      else {
-	 done = 1;
-      }
-   }
-   nfrontp += len;
-}
+static struct buflist head = { next: &head, buf: 0, len: 0 };
+static struct buflist *tail = &head;
+static size_t skip;
+static int trailing;
+static size_t listlen;
+static int doclear;
+static struct buflist *urg;
 
 /*
  * ttloop
@@ -92,9 +78,7 @@ ttloop(void)
 
     DIAG(TD_REPORT, netoprintf("td: ttloop\r\n"););
 		     
-    if (nfrontp-nbackp) {
-	netflush();
-    }
+    netflush();
     ncc = read(net, netibuf, sizeof(netibuf));
     if (ncc < 0) {
 	syslog(LOG_INFO, "ttloop: read: %m\n");
@@ -168,33 +152,64 @@ void 	ptyflush(void)
  * character.
  */
 static
-char *
-nextitem(char *current)
-{
-    if ((*current&0xff) != IAC) {
-	return current+1;
-    }
-    switch (*(current+1)&0xff) {
-    case DO:
-    case DONT:
-    case WILL:
-    case WONT:
-	return current+3;
-    case SB:		/* loop forever looking for the SE */
-	{
-	    register char *look = current+2;
-
-	    for (;;) {
-		if ((*look++&0xff) == IAC) {
-		    if ((*look++&0xff) == SE) {
-			return look;
-		    }
-		}
-	    }
+const char *
+nextitem(
+	const unsigned char *current, const unsigned char *end,
+	const unsigned char *next, const unsigned char *nextend
+) {
+	if (*current++ != IAC) {
+		while (current < end && *current++ != IAC)
+			;
+		goto out;
 	}
-    default:
-	return current+2;
-    }
+
+	if (current >= end) {
+		current = next;
+		if (!current) {
+			return 0;
+		}
+		end = nextend;
+		next = 0;
+	}
+
+	switch (*current++) {
+	case DO:
+	case DONT:
+	case WILL:
+	case WONT:
+		current++;
+		break;
+	case SB:		/* loop forever looking for the SE */
+		for (;;) {
+			int iac;
+
+			while (iac = 0, current < end) {
+				if (*current++ == IAC) {
+					if (current >= end) {
+						iac = 1;
+						break;
+					}
+iac:
+					if (*current++ == SE) {
+						goto out;
+					}
+				}
+			}
+
+			current = next;
+			if (!current) {
+				return 0;
+			}
+			end = nextend;
+			next = 0;
+			if (iac) {
+				goto iac;
+			}
+		}
+	}
+
+out:
+	return next ? next + (current - end) : current;
 }  /* end of nextitem */
 
 
@@ -216,145 +231,103 @@ nextitem(char *current)
  */
 void netclear(void)
 {
-    register char *thisitem, *next;
-    char *good;
-#define	wewant(p)	((nfrontp > p) && ((*p&0xff) == IAC) && \
-				((*(p+1)&0xff) != EC) && ((*(p+1)&0xff) != EL))
-
-#if	defined(ENCRYPT)
-    thisitem = nclearto > netobuf ? nclearto : netobuf;
-#else
-    thisitem = netobuf;
-#endif
-
-    while ((next = nextitem(thisitem)) <= nbackp) {
-	thisitem = next;
-    }
-
-    /* Now, thisitem is first before/at boundary. */
-
-#if	defined(ENCRYPT)
-    good = nclearto > netobuf ? nclearto : netobuf;
-#else
-    good = netobuf;	/* where the good bytes go */
-#endif
-
-    while (nfrontp > thisitem) {
-	if (wewant(thisitem)) {
-	    int length;
-
-	    next = thisitem;
-	    do {
-		next = nextitem(next);
-	    } while (wewant(next) && (nfrontp > next));
-	    length = next-thisitem;
-	    bcopy(thisitem, good, length);
-	    good += length;
-	    thisitem = next;
-	} else {
-	    thisitem = nextitem(thisitem);
-	}
-    }
-
-    nbackp = netobuf;
-    nfrontp = good;		/* next byte to be sent */
-    neturg = 0;
+	doclear++;
+	netflush();
+	doclear--;
 }  /* end of netclear */
+
+static void
+netwritebuf(void)
+{
+	struct iovec *vector;
+	struct iovec *v;
+	struct buflist *lp;
+	ssize_t n;
+	size_t len;
+	int ltrailing = trailing;
+
+	if (!listlen)
+		return;
+
+	vector = malloc(listlen * sizeof(struct iovec));
+	if (!vector) {
+		return;
+	}
+
+	len = listlen - (doclear & ltrailing);
+	v = vector;
+	lp = head.next;
+	while (lp != &head) {
+		if (lp == urg) {
+			len = v - vector;
+			if (!len) {
+				n = send(net, lp->buf, 1, MSG_OOB);
+				if (n > 0) {
+					urg = 0;
+				}
+				goto epi;
+			}
+			break;
+		}
+		v->iov_base = lp->buf;
+		v->iov_len = lp->len;
+		v++;
+		lp = lp->next;
+	}
+
+	vector->iov_base = (char *)vector->iov_base + skip;
+	vector->iov_len -= skip;
+
+	n = writev(net, vector, len);
+
+epi:
+	free(vector);
+
+	if (n < 0) {
+		if (errno != EWOULDBLOCK && errno != EINTR)
+			cleanup(0);
+		return;
+	}
+
+	len = n + skip;
+
+	lp = head.next;
+	while (lp->len <= len) {
+		if (lp == tail && ltrailing) {
+			break;
+		}
+
+		len -= lp->len;
+
+		head.next = lp->next;
+		listlen--;
+		free(lp->buf);
+		free(lp);
+
+		lp = head.next;
+		if (lp == &head) {
+			tail = &head;
+			break;
+		}
+	}
+
+	skip = len;
+}
 
 /*
  *  netflush
- *		Send as much data as possible to the network,
- *	handling requests for urgent data.
+ *             Send as much data as possible to the network,
+ *     handling requests for urgent data.
  */
-extern int not42;
 void
 netflush(void)
 {
-    int n;
-
-    if ((n = nfrontp - nbackp) > 0) {
-	DIAG(TD_REPORT,
-	    { netoprintf("td: netflush %d chars\r\n", n);
-	      n = nfrontp - nbackp;  /* update count */
-	    });
-#if	defined(ENCRYPT)
-	if (encrypt_output) {
-		char *s = nclearto ? nclearto : nbackp;
-		if (nfrontp - s > 0) {
-			(*encrypt_output)((unsigned char *)s, nfrontp-s);
-			nclearto = nfrontp;
-		}
+	if (fflush(netfile)) {
+		/* out of memory? */
+		cleanup(0);
 	}
-#endif
-	/*
-	 * if no urgent data, or if the other side appears to be an
-	 * old 4.2 client (and thus unable to survive TCP urgent data),
-	 * write the entire buffer in non-OOB mode.
-	 */
-	if ((neturg == 0) || (not42 == 0)) {
-	    n = write(net, nbackp, n);	/* normal write */
-	} else {
-	    n = neturg - nbackp;
-	    /*
-	     * In 4.2 (and 4.3) systems, there is some question about
-	     * what byte in a sendOOB operation is the "OOB" data.
-	     * To make ourselves compatible, we only send ONE byte
-	     * out of band, the one WE THINK should be OOB (though
-	     * we really have more the TCP philosophy of urgent data
-	     * rather than the Unix philosophy of OOB data).
-	     */
-	    if (n > 1) {
-		n = send(net, nbackp, n-1, 0);	/* send URGENT all by itself */
-	    } else {
-		n = send(net, nbackp, n, MSG_OOB);	/* URGENT data */
-	    }
-	}
-    }
-    if (n < 0) {
-	if (errno == EWOULDBLOCK || errno == EINTR)
-		return;
-	cleanup(0);
-    }
-    nbackp += n;
-#if	defined(ENCRYPT)
-    if (nbackp > nclearto)
-	nclearto = 0;
-#endif
-    if (nbackp >= neturg) {
-	neturg = 0;
-    }
-    if (nbackp == nfrontp) {
-	nbackp = nfrontp = netobuf;
-#if	defined(ENCRYPT)
-	nclearto = 0;
-#endif
-    }
-    return;
-}  /* end of netflush */
-
-
-/*
- * writenet
- *
- * Just a handy little function to write a bit of raw data to the net.
- * It will force a transmit of the buffer if necessary
- *
- * arguments
- *    ptr - A pointer to a character string to write
- *    len - How many bytes to write
- */
-void writenet(register unsigned char *ptr, register int len)
-{
-	/* flush buffer if no room for new data) */
-	if ((&netobuf[BUFSIZ] - nfrontp) < len) {
-		/* if this fails, don't worry, buffer is a little big */
-		netflush();
-	}
-
-	bcopy(ptr, nfrontp, len);
-	nfrontp += len;
-
-}  /* end of writenet */
+	netwritebuf();
+}
 
 
 /*
@@ -391,18 +364,30 @@ fatalperror(int f, const char *msg)
 	fatal(f, buf);
 }
 
-char editedhost[32];
+char *editedhost;
 struct utsname kerninfo;
 
 void
 edithost(const char *pat, const char *host)
 {
-	char *res = editedhost;
+	char *res;
 
 	uname(&kerninfo);
 
 	if (!pat)
 		pat = "";
+
+	res = realloc(editedhost, strlen(pat) + strlen(host) + 1);
+	if (!res) {
+		if (editedhost) {
+			free(editedhost);
+			editedhost = 0;
+		}
+		fprintf(stderr, "edithost: Out of memory\n");
+		return;
+	}
+	editedhost = res;
+
 	while (*pat) {
 		switch (*pat) {
 
@@ -420,18 +405,12 @@ edithost(const char *pat, const char *host)
 			*res++ = *pat;
 			break;
 		}
-		if (res == &editedhost[sizeof editedhost - 1]) {
-			*res = '\0';
-			return;
-		}
 		pat++;
 	}
 	if (*host)
-		(void) strncpy(res, host,
-				sizeof editedhost - (res - editedhost) -1);
+		(void) strcpy(res, host);
 	else
 		*res = '\0';
-	editedhost[sizeof editedhost - 1] = '\0';
 }
 
 static char *putlocation;
@@ -475,7 +454,9 @@ void putf(const char *cp, char *where)
 			break;
 
 		case 'h':
-			putstr(editedhost);
+			if (editedhost) {
+				putstr(editedhost);
+			}
 			break;
 
 		case 'd':
@@ -1118,11 +1099,6 @@ printdata(const char *tag, const char *ptr, int cnt)
 	char xbuf[30];
 
 	while (cnt) {
-		/* flush net output buffer if no room for new data) */
-		if ((&netobuf[BUFSIZ] - nfrontp) < 80) {
-			netflush();
-		}
-
 		/* add a line of output */
 		netoprintf("%s: ", tag);
 		for (i = 0; i < 20 && cnt; i++) {
@@ -1143,3 +1119,154 @@ printdata(const char *tag, const char *ptr, int cnt)
 	} 
 }
 #endif /* DIAGNOSTICS */
+
+static struct buflist *
+addbuf(const char *buf, size_t len)
+{
+	struct buflist *bufl;
+
+	bufl = malloc(sizeof(struct buflist));
+	if (!bufl) {
+		return 0;
+	}
+	bufl->next = tail->next;
+	bufl->buf = malloc(len);
+	if (!bufl->buf) {
+		free(bufl);
+		return 0;
+	}
+	bufl->len = len;
+
+	tail = tail->next = bufl;
+	listlen++;
+
+	memcpy(bufl->buf, buf, len);
+	return bufl;
+}
+
+static ssize_t
+netwrite(void *cookie, const char *buf, size_t len)
+{
+	size_t ret;
+	const char *const end = buf + len;
+	int ltrailing = trailing;
+	int ldoclear = doclear;
+
+#define	wewant(p)	((*p&0xff) == IAC) && \
+				((*(p+1)&0xff) != EC) && ((*(p+1)&0xff) != EL)
+
+	ret = 0;
+
+	if (ltrailing) {
+		const char *p;
+		size_t l;
+		size_t m = tail->len;
+
+		p = nextitem(tail->buf, tail->buf + tail->len, buf, end);
+		ltrailing = !p;
+		if (ltrailing) {
+			p = end;
+		}
+
+		l = p - buf;
+		tail->len += l;
+		tail->buf = realloc(tail->buf, tail->len);
+		if (!tail->buf) {
+			return -1;
+		}
+
+		memcpy(tail->buf + m, buf, l);
+		buf += l;
+		len -= l;
+		ret += l;
+		trailing = ltrailing;
+	}
+
+	if (ldoclear) {
+		struct buflist *lpprev;
+
+		skip = 0;
+		lpprev = &head;
+		for (;;) {
+			struct buflist *lp;
+
+			lp = lpprev->next;
+
+			if (lp == &head) {
+				tail = lpprev;
+				break;
+			}
+
+			if (lp == tail && ltrailing) {
+				break;
+			}
+
+			if (!wewant(lp->buf)) {
+				lpprev->next = lp->next;
+				listlen--;
+				free(lp->buf);
+				free(lp);
+			} else {
+				lpprev = lp;
+			}
+		}
+	}
+
+	while (len) {
+		const char *p;
+		size_t l;
+
+		p = nextitem(buf, end, 0, 0);
+		ltrailing = !p;
+		if (ltrailing) {
+			p = end;
+		} else if (ldoclear) {
+			if (!wewant(buf)) {
+				l = p - buf;
+				goto cont;
+			}
+		}
+
+		l = p - buf;
+		if (!addbuf(buf, l)) {
+			return ret ? ret : -1;
+		}
+		trailing = ltrailing;
+
+cont:
+		buf += l;
+		len -= l;
+		ret += l;
+	}
+
+	netwritebuf();
+	return ret;
+}
+
+void
+netopen() {
+	static const cookie_io_functions_t funcs = {
+		read: 0, write: netwrite, seek: 0, close: 0
+	};
+
+	netfile = fopencookie(0, "w", funcs);
+}
+
+extern int not42;
+void
+sendurg(const char *buf, size_t len) {
+	if (!not42) {
+		fwrite(buf, 1, len, netfile);
+		return;
+	}
+
+	urg = addbuf(buf, len);
+}
+
+size_t
+netbuflen(int flush) {
+	if (flush) {
+		netflush();
+	}
+	return listlen != 1 ? listlen : tail->len - skip;
+}

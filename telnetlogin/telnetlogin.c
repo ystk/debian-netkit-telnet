@@ -51,20 +51,24 @@ char rcsid[] =
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <syslog.h>
 
 #ifndef _PATH_LOGIN
 #define _PATH_LOGIN "/bin/login"
 #endif
 
+extern char **environ;
+
 static const char *remhost = NULL;
+
+static void die(const char *, ...) __attribute__ ((noreturn));
 
 static void die(const char *fmt, ...) {
    va_list ap;
-   fprintf(stderr, "telnetlogin: ");
+   openlog("telnetlogin", LOG_PID, LOG_AUTHPRIV);
    va_start(ap, fmt);
-   vfprintf(stderr, fmt, ap);
+   vsyslog(LOG_CRIT, fmt, ap);
    va_end(ap);
-   fprintf(stderr, "\n");
    exit(1);
 }
 
@@ -86,41 +90,6 @@ static int check_term(char *termtype) {
    return 0;
 }
 
-static int check_display(char *disp) {
-   char *colon, *s;
-   struct hostent *hp;
-   int num;
-
-   colon = strchr(disp, ':');
-   if (!colon) return -1;
-   *colon = 0;  /* temporarily */
-
-   if (check_a_hostname(disp)) return -1;
-
-   hp = gethostbyname(disp);
-   if (!hp) return -1;
-
-   *colon = ':';
-   s = colon+1;
-   while (*s && isdigit(*s)) s++;
-   if (*s) {
-      if (*s!='.') return -1;
-      s++;
-      while (*s && isdigit(*s)) s++;
-   }
-   if (*s) return -1;
-
-   num = atoi(colon+1);
-   if (num<0 || num>99) return -1;
-
-   return 0;
-}
-
-static int check_posixly_correct(char *val) {
-   if (strlen(val)==0 || !strcmp(val, "1")) return 0;
-   return -1;
-}
-
 static int check_remotehost(char *val) {
    if (check_a_hostname(val)) return -1;
    if (remhost && strcmp(val, remhost)) return -1;
@@ -132,8 +101,6 @@ struct {
    int (*validator)(char *);
 } legal_envs[] = {
    { "TERM", check_term },
-   { "DISPLAY", check_display },
-   { "POSIXLY_CORRECT", check_posixly_correct },
    { "REMOTEHOST", check_remotehost },
    { NULL, NULL }
 };
@@ -166,10 +133,7 @@ int main(int argc, char *argv[]) {
    static char argv0[] = "login";
    int argn, i, j;
    const char *rh = NULL;
-   char **envs = __environ;
-
-   /* make as sure as possible no library routines or anything can use it */
-   __environ = NULL;
+   char **envs = environ;
 
    /* first, make sure our stdin/stdout/stderr are aimed somewhere */
    i = open("/", O_RDONLY);
@@ -194,6 +158,9 @@ int main(int argc, char *argv[]) {
    if (argn < argc && !strcmp(argv[argn], "-p")) {
       argn++;
    }
+   if (argn < argc && argv[argn][0] != '-') {
+      argn++;
+   }
    if (argn < argc) die("Illegal args: too many args");
    argv[0] = argv0;
 
@@ -201,21 +168,22 @@ int main(int argc, char *argv[]) {
    if (envs) for (i=0; envs[i]; i++) {
       char *testenv = envs[i];
       size_t testlen = strlen(testenv);
-      int ok = 0;
-      for (j=0; legal_envs[j].name && !ok; j++) {
+      for (j=0; legal_envs[j].name; j++) {
 	 const char *okenv = legal_envs[j].name;
 	 size_t oklen = strlen(okenv);
+	 int sign;
 
 	 if (testlen < oklen) continue;
 	 if (testenv[oklen]!='=') continue;
-	 if (memcmp(testenv, okenv, oklen)) continue;
+	 if ((sign = memcmp(testenv, okenv, oklen)) < 0) {
+	    continue;
+	 } else if (sign > 0) {
+	    break;
+	 }
 	 if (legal_envs[j].validator(testenv+oklen+1)) {
 	    die("Invalid environment: bad value for %s", okenv);
 	 }
-	 ok = 1;
-      }
-      if (!ok) {
-	 die("Illegal environment: forbidden variable");
+	 break;
       }
    }
 
@@ -233,6 +201,13 @@ int main(int argc, char *argv[]) {
     * 
     * but, should we insist that ruid==nobody?
     */
+
+#ifdef debian
+   /*
+    * Debian's /bin/login doesn't work properly unless we're really root.
+    */
+   setuid(0);
+#endif
 
    /*
     * don't do anything with limits, itimers, or process priority either

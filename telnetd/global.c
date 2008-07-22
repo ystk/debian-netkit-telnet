@@ -87,10 +87,9 @@ char	ptyobuf[BUFSIZ+NETSLOP], *pfrontp, *pbackp;
 
 char	netibuf[BUFSIZ], *netip;
 
-char	netobuf[BUFSIZ+NETSLOP], *nfrontp, *nbackp;
-char	*neturg;		/* one past last bye of urgent data */
-
 int	pcc, ncc;
+
+FILE	*netfile;
 
 int	pty, net;
 int	SYNCHing;		/* we are in TELNET SYNCH mode */

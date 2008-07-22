@@ -86,10 +86,6 @@ char cmd_rcsid[] =
 
 #define HELPINDENT ((int) sizeof ("connect"))
 
-#ifndef       MAXHOSTNAMELEN
-#define       MAXHOSTNAMELEN 64
-#endif        MAXHOSTNAMELEN
-
 #if	defined(HAS_IPPROTO_IP) && defined(IP_TOS)
 int tos = -1;
 #endif	/* defined(HAS_IPPROTO_IP) && defined(IP_TOS) */
@@ -98,7 +94,7 @@ static unsigned long sourceroute(char *arg, char **cpp, int *lenp);
 
 
 char	*hostname;
-static char _hostname[MAXHOSTNAMELEN];
+static char *_hostname;
 
 //typedef int (*intrtn_t)(int argc, const char *argv[]);
 
@@ -161,7 +157,7 @@ class command_entry {
 	assert(argc>=1);
 	if (nargs>=0 && argc!=nargs+1) {
 	    fprintf(stderr, "Wrong number of arguments for command.\n");
-	    fprintf(stderr, "Try %s ? for help\n", argv[0]);
+	    fprintf(stderr, "Try ? %s for help\n", argv[0]);
 	    return 0;    /* is this right? */
 	}
 	if (nargs==-2) {
@@ -480,6 +476,7 @@ static int send_wontcmd(const char *name, const char *) {
 int send_tncmd(int (*func)(int, int), const char *cmd, const char *name) {
     char **cpp;
     extern char *telopts[];
+    long opt;
 
     if (isprefix(name, "help") || isprefix(name, "?")) {
 	register int col, len;
@@ -506,16 +503,23 @@ int send_tncmd(int (*func)(int, int), const char *cmd, const char *name) {
 					name, cmd);
 	return 0;
     }
+
+    opt = cpp - telopts;
     if (cpp == 0) {
-	fprintf(stderr, "'%s': unknown argument ('send %s ?' for help).\n",
+	char *end;
+
+	opt = strtol(name, &end, 10);
+	if (*end || opt < 0 || opt > 255) {
+	    fprintf(stderr, "'%s': unknown argument ('send %s ?' for help).\n",
 					name, cmd);
-	return 0;
+	    return 0;
+	}
     }
     if (!connected) {
 	printf("?Need to be connected first.\n");
 	return 0;
     }
-    (*func)(cpp - telopts, 1);
+    (*func)(opt, 1);
     return 1;
 }
 
@@ -689,9 +693,9 @@ static struct togglelist Togglelist[] = {
       "print encryption debugging information" },
 #endif
 
-    { "skiprc", "don't read ~/.telnetrc file",
+    { "skiprc", "don't read the telnetrc files",
       NULL, &skiprc,
-      "read ~/.telnetrc file" },
+      "read the telnetrc files" },
     { "binary",
       "sending and receiving of binary data",
       togbinary, NULL,
@@ -1615,15 +1619,20 @@ void ayt_status(int) {
 #endif
 
 int tn(int argc, const char *argv[]) {
-    register struct hostent *host = 0;
     struct sockaddr_in sn;
-    struct servent *sp = 0;
     char *srp = NULL;
     int srlen;
-
-    const char *cmd, *volatile user = 0;
+    int family = 0;
+    const char *cmd, *volatile user = 0, *srchostp = 0;
     const char *portp = NULL;
     char *hostp = NULL;
+    char *resolv_hostp;
+    struct addrinfo hints;
+    struct addrinfo *hostaddr = 0;
+    int res;
+    char name[NI_MAXHOST];
+    char service[NI_MAXSERV];
+    struct addrinfo *tmpaddr;
 
     /* clear the socket address prior to use */
     memset(&sn, 0, sizeof(sn));
@@ -1631,6 +1640,10 @@ int tn(int argc, const char *argv[]) {
     if (connected) {
 	printf("?Already connected to %s\n", hostname);
 	return 0;
+    }
+    if (_hostname) {
+	delete[] _hostname;
+	_hostname = 0;
     }
     if (argc < 2) {
 	(void) strcpy(line, "open ");
@@ -1657,9 +1670,31 @@ int tn(int argc, const char *argv[]) {
 	    --argc;
 	    continue;
 	}
+	if (strcmp(*argv, "-b") == 0) {
+	    --argc; ++argv;
+	    if (argc == 0)
+		goto usage;
+	    srchostp = *argv++;
+	    --argc;
+	    continue;
+	}
 	if (strcmp(*argv, "-a") == 0) {
 	    --argc; ++argv;
 	    autologin = 1;
+	    continue;
+	}
+	if (strcmp(*argv, "-6") == 0) {
+	    --argc; ++argv;
+#ifdef AF_INET6
+	    family = AF_INET6;
+#else
+	    puts("IPv6 unsupported");
+#endif
+	    continue;
+	}
+	if (strcmp(*argv, "-4") == 0) {
+	    --argc; ++argv;
+	    family = AF_INET;
 	    continue;
 	}
 	if (hostp == 0) {
@@ -1680,6 +1715,8 @@ int tn(int argc, const char *argv[]) {
     if (hostp == 0)
 	goto usage;
 
+    resolv_hostp = hostp;
+
 #if defined(IP_OPTIONS) && defined(HAS_IPPROTO_IP)
     if (hostp[0] == '@' || hostp[0] == '!') {
 	if ((hostname = strrchr(hostp, ':')) == NULL)
@@ -1696,78 +1733,122 @@ int tn(int argc, const char *argv[]) {
 	} else {
 	    sn.sin_addr.s_addr = temp;
 	    sn.sin_family = AF_INET;
+	    /*
+	     * For source route we just make sure to get the IP given
+	     * on the command line when looking up the port.
+	     */
+	    resolv_hostp = inet_ntoa(sn.sin_addr);
 	}
     } 
-    else {
 #endif
-	if (inet_aton(hostp, &sn.sin_addr)) {
-	    sn.sin_family = AF_INET;
-	    strcpy(_hostname, hostp);
-	    hostname = _hostname;
-	} 
-	else {
-	    host = gethostbyname(hostp);
-	    if (host) {
-		sn.sin_family = host->h_addrtype;
-		if (host->h_length > (int)sizeof(sn.sin_addr)) {
-		    host->h_length = sizeof(sn.sin_addr);
-		}
-#if	defined(h_addr)		/* In 4.3, this is a #define */
-		memcpy((caddr_t)&sn.sin_addr,
-				host->h_addr_list[0], host->h_length);
-#else	/* defined(h_addr) */
-		memcpy((caddr_t)&sn.sin_addr, host->h_addr, host->h_length);
-#endif	/* defined(h_addr) */
-		strncpy(_hostname, host->h_name, sizeof(_hostname));
-		_hostname[sizeof(_hostname)-1] = '\0';
-		hostname = _hostname;
-	    } else {
-		herror(hostp);
-		return 0;
-	    }
-	}
-#if defined(IP_OPTIONS) && defined(HAS_IPPROTO_IP)
-    }
-#endif
+
+    /* User port or the default name of telnet. */
     if (portp) {
 	if (*portp == '-') {
 	    portp++;
 	    telnetport = 1;
-	} else
+	} else {
 	    telnetport = 0;
-	sn.sin_port = atoi(portp);
-	if (sn.sin_port == 0) {
-	    sp = getservbyname(portp, "tcp");
-	    if (sp)
-		sn.sin_port = sp->s_port;
-	    else {
-		printf("%s: bad port number\n", portp);
-		return 0;
+	    if (*portp >='0' && *portp<='9') {
+	       char *end;
+	       long int p;
+
+	       p=strtol(portp, &end, 10);
+	       if (ERANGE==errno && (LONG_MIN==p || LONG_MAX==p)) {
+	          fprintf(stderr, "telnet: port %s overflows\n", portp);
+		  return 0;
+	       } else if (p<=0 || p>=65536) {
+	          fprintf(stderr, "telnet: port %s out of range\n", portp);
+		  return 0;
+	       }
 	    }
-	} 
-	else {
-	    sn.sin_port = htons(sn.sin_port);
 	}
-    } 
+    }
     else {
-	if (sp == 0) {
-	    sp = getservbyname("telnet", "tcp");
-	    if (sp == 0) {
-		fprintf(stderr, "telnet: tcp/telnet: unknown service\n");
-		return 0;
-	    }
-	    sn.sin_port = sp->s_port;
-	}
+	portp = "telnet";
 	telnetport = 1;
     }
-    printf("Trying %s...\n", inet_ntoa(sn.sin_addr));
+
+    /* We only understand SOCK_STREAM sockets. */
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_NUMERICHOST;
+    hints.ai_family = family;
+
+    if (srchostp) {
+	res = getaddrinfo(srchostp, "0", &hints, &hostaddr);
+	if (res) {
+	    fprintf(stderr, "telnet: could not resolve %s: %s\n", srchostp,
+		    gai_strerror(res));
+	    return 0;
+	}
+	hints.ai_family = hostaddr->ai_family;
+	res = nlink.bind(hostaddr);
+	freeaddrinfo(hostaddr);
+	if (res < 0)
+	    return 0;
+    }
+        
+    /* Resolve both the host and service simultaneously. */
+    res = getaddrinfo(resolv_hostp, portp, &hints, &hostaddr);
+    if (res == EAI_NONAME) {
+	hints.ai_flags = AI_CANONNAME;
+	res = getaddrinfo(resolv_hostp, portp, &hints, &hostaddr);
+    } else if (hostaddr) {
+	hostaddr->ai_canonname = 0;
+    }
+    if (res || !hostaddr) {
+	fprintf(stderr, "telnet: could not resolve %s/%s: %s\n", resolv_hostp, portp, gai_strerror(res));
+	return 0;
+    }
+     
+    /* Try to connect to every listed round robin IP. */
+    tmpaddr = hostaddr;
+    errno = 0;
     do {
-	int x = nlink.connect(debug, host, &sn, srp, srlen, tos);
-	if (!x) return 0;
-	else if (x==1) continue;
+	int x;
+
+	if (!tmpaddr) {
+	    if (errno)
+		perror("telnet: Unable to connect to remote host");
+	    else
+		fputs("telnet: Unable to connect to remote host: "
+		      "Bad port number\n", stderr);
+err:
+	    freeaddrinfo(hostaddr);
+	    return 0;
+	}
+
+	if (tmpaddr->ai_family == AF_UNIX) {
+nextaddr:
+	    tmpaddr = tmpaddr->ai_next;
+	    continue;
+	}
+
+	getnameinfo(tmpaddr->ai_addr, tmpaddr->ai_addrlen,
+		    name, sizeof(name), service, sizeof(service),
+		    NI_NUMERICHOST | NI_NUMERICSERV);
+
+	printf("Trying %s...\n", name);
+	x = nlink.connect(debug, tmpaddr, srp, srlen, tos);
+	if (!x)
+	    goto err;
+	else if (x==1)
+	    goto nextaddr;
+
 	connected++;
     } while (connected == 0);
-    cmdrc(hostp, hostname);
+    if (tmpaddr->ai_canonname == 0) {
+	hostname = new char[strlen(hostp)+1];
+	strcpy(hostname, hostp);
+    }
+    else {
+	hostname = new char[strlen(tmpaddr->ai_canonname)+1];
+	strcpy(hostname, tmpaddr->ai_canonname);
+    }
+
+    cmdrc(hostp, hostname, portp);
+    freeaddrinfo(hostaddr);
     if (autologin && user == NULL) {
 	struct passwd *pw;
 
@@ -2013,30 +2094,21 @@ static int help(command_table *tab, int argc, const char *argv[]) {
     return 0;
 }
 
-static char *rcname = 0;
-static char rcbuf[128];
-
-void cmdrc(const char *m1, const char *m2) {
+static void readrc(const char *m1, const char *m2, const char *port,
+		   const char *rcname)
+{
     FILE *rcfile;
     int gotmachine = 0;
     int l1 = strlen(m1);
     int l2 = strlen(m2);
-    char m1save[64];
-
-    if (skiprc) return;
+    int lport = strlen(port);
+    char m1save[l1 + 1];
+    char portsave[lport + 1];
 
     strcpy(m1save, m1);
     m1 = m1save;
-
-    if (rcname == 0) {
-	rcname = getenv("HOME");
-	if (rcname)
-	    strcpy(rcbuf, rcname);
-	else
-	    rcbuf[0] = '\0';
-	strcat(rcbuf, "/.telnetrc");
-	rcname = rcbuf;
-    }
+    strcpy(portsave, port);
+    port = portsave;
 
     rcfile = fopen(rcname, "r");
     if (!rcfile) return;
@@ -2061,6 +2133,13 @@ void cmdrc(const char *m1, const char *m2) {
 		strncpy(line, &line[7], sizeof(line) - 7);
 	    else
 		continue;
+
+	    if (line[0] == ':') {
+		if (!strncasecmp(&line[1], port, lport))
+		    continue;
+		strncpy(line, &line[lport + 1], sizeof(line) - lport - 1);
+	    }
+
 	    if (line[0] != ' ' && line[0] != '\t' && line[0] != '\n')
 		continue;
 	    gotmachine = 1;
@@ -2071,6 +2150,21 @@ void cmdrc(const char *m1, const char *m2) {
 	process_command(&cmdtab, margc, margv);
     }
     fclose(rcfile);
+}
+
+void cmdrc(const char *m1, const char *m2, const char *port) {
+    char *rcname = NULL;
+
+    if (skiprc) return;
+
+    readrc(m1, m2, port, "/etc/telnetrc");
+    if (asprintf (&rcname, "%s/.telnetrc", getenv ("HOME")) == -1)
+      {
+        perror ("asprintf");
+        return;
+      }
+    readrc(m1, m2, port, rcname);
+    free (rcname);
 }
 
 #if defined(IP_OPTIONS) && defined(HAS_IPPROTO_IP)

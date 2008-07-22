@@ -55,10 +55,11 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/time.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/telnet.h>
+#include <sys/uio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>

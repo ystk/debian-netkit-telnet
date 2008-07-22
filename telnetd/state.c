@@ -179,6 +179,7 @@ void telrcv(void) {
 		   */
 	      case AO:
 		  {
+		      static const char msg[] = { IAC, DM };
 		      DIAG(TD_OPTIONS, printoption("td: recv IAC", c));
 		      ptyflush();	/* half-hearted */
 		      init_termbuf();
@@ -191,9 +192,7 @@ void telrcv(void) {
 		      }
 
 		      netclear();	/* clear buffer back */
-		      *nfrontp++ = (char)IAC;
-		      *nfrontp++ = (char)DM;
-		      neturg = nfrontp-1; /* off by one XXX */
+		      sendurg(msg, sizeof(msg));
 		      DIAG(TD_OPTIONS, printoption("td: send IAC", DM));
 		      break;
 		  }

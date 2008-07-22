@@ -1,13 +1,16 @@
 
 class netlink {
+ private:
+    int family;
  protected:
     int net;
  public:
     netlink();
     ~netlink();
 
-    int connect(int debug, struct hostent *host, 
-		struct sockaddr_in *sin, 
+    int bind(struct addrinfo *hostaddr);
+    int socket(int family);
+    int connect(int debug, struct addrinfo *hostaddr, 
 		char *srcroute, int srlen,
 		int tos);
     void close(int doshutdown);

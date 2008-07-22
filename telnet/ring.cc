@@ -165,7 +165,7 @@ int ringbuf::flush() {
 
 /////////////////////////////////////////////////// supply //////////////
 
-void ringbuf::printf(const char *format, ...) {
+void ringbuf::xprintf(const char *format, ...) {
     char xbuf[256];
     va_list ap;
     va_start(ap, format);

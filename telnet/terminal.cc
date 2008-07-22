@@ -45,6 +45,8 @@ char terminal_rcsid[] =
 #include <signal.h>
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "ring.h"
 #include "defines.h"
@@ -155,9 +157,11 @@ int getconnmode(void) {
     if (localflow)
 	mode |= MODE_FLOW;
 
-    if (my_want_state_is_will(TELOPT_BINARY))
+    if ((eight & 1) || my_want_state_is_will(TELOPT_BINARY))
 	mode |= MODE_INBIN;
 
+    if (eight & 2)
+	mode |= MODE_OUT8;
     if (his_want_state_is_will(TELOPT_BINARY))
 	mode |= MODE_OUTBIN;
 
@@ -449,10 +453,13 @@ void TerminalNewMode(int f)
 		// breaks SunOS.
 	 	tmp_tc.c_iflag |= ISTRIP;
 	}
-	if (f & MODE_OUTBIN) {
+	if (f & (MODE_OUTBIN|MODE_OUT8)) {
 		tmp_tc.c_cflag &= ~(CSIZE|PARENB);
 		tmp_tc.c_cflag |= CS8;
-		tmp_tc.c_oflag &= ~OPOST;
+		if (f & MODE_OUTBIN)
+			tmp_tc.c_oflag &= ~OPOST;
+		else
+			tmp_tc.c_oflag |= OPOST;
 	} else {
 		tmp_tc.c_cflag &= ~(CSIZE|PARENB);
 		tmp_tc.c_cflag |= old_tc.c_cflag & (CSIZE|PARENB);
@@ -468,7 +475,7 @@ void TerminalNewMode(int f)
 
 #ifdef	SIGINFO
 	signal(SIGINFO, ayt);
-#endif	SIGINFO
+#endif	/* SIGINFO */
 
 #if defined(NOKERNINFO)
 	tmp_tc.c_lflag |= NOKERNINFO;
@@ -504,7 +511,7 @@ void TerminalNewMode(int f)
 
 #ifdef	SIGINFO
 	signal(SIGINFO, ayt_status);
-#endif	SIGINFO
+#endif	/* SIGINFO */
 
 #ifdef	SIGTSTP
 	signal(SIGTSTP, SIG_DFL);

@@ -45,7 +45,10 @@ char main_rcsid[] =
 
 #include <sys/types.h>
 #include <getopt.h>
+#include <stdlib.h>
 #include <string.h>
+#include <netdb.h>
+#include <errno.h>
 
 #include "ring.h"
 #include "externs.h"
@@ -80,12 +83,13 @@ tninit(void)
 void usage(void) {
     fprintf(stderr, "Usage: %s %s%s%s%s\n",
 	    prompt,
-	    " [-8] [-E] [-L] [-a] [-d] [-e char] [-l user] [-n tracefile]",
-	    "\n\t",
+	    "[-4] [-6] [-8] [-E] [-L] [-a] [-d] [-e char] [-l user]",
+	    "\n\t[-n tracefile] [ -b addr ]",
 #ifdef TN3270
+	    "\n\t"
 	    "[-noasynch] [-noasynctty] [-noasyncnet] [-r] [-t transcom]\n\t",
 #else
-	    "[-r] ",
+	    " [-r] ",
 #endif
 	    "[host-name [port]]"
 	);
@@ -102,7 +106,8 @@ main(int argc, char *argv[])
 	extern char *optarg;
 	extern int optind;
 	int ch;
-	char *user;
+	char *user, *srcaddr;
+	int family;
 
 	tninit();		/* Clear out things */
 #if	defined(CRAY) && !defined(__STDC__)
@@ -110,21 +115,38 @@ main(int argc, char *argv[])
 #endif
 
 	TerminalSaveState();
+	if ((old_tc.c_cflag & (CSIZE|PARENB)) != CS8)
+		eight = 0;
 
 	if ((prompt = strrchr(argv[0], '/'))!=NULL)
 		++prompt;
 	else
 		prompt = argv[0];
 
-	user = NULL;
+	user = srcaddr = NULL;
+	family = 0;
 
 	rlogin = (strncmp(prompt, "rlog", 4) == 0) ? '~' : _POSIX_VDISABLE;
 	autologin = -1;
 
-	while ((ch = getopt(argc, argv, "8EKLS:X:ade:k:l:n:rt:x")) != EOF) {
+	while ((ch = getopt(argc, argv,
+			    "4678EKLS:X:ab:de:k:l:n:rt:x")) != EOF) {
 		switch(ch) {
+		case '4':
+			family = AF_INET;
+			break;
+		case '6':
+#ifdef AF_INET6
+			family = AF_INET6;
+#else
+			fputs("IPv6 unsupported\n", stderr);
+#endif
+			break;
+		case '7':
+			eight = 0;	/* 7-bit ouput and input */
+			break;
 		case '8':
-			eight = 3;	/* binary output and input */
+			binary = 3;	/* binary output and input */
 			break;
 		case 'E':
 			rlogin = escapechar = _POSIX_VDISABLE;
@@ -133,23 +155,26 @@ main(int argc, char *argv[])
 		        //autologin = 0;
 			break;
 		case 'L':
-			eight |= 2;	/* binary output only */
+			binary |= 2;	/* binary output only */
 			break;
 		case 'S':
 		    {
-#ifdef	HAS_GETTOS
 			extern int tos;
+			int num;
 
-			if ((tos = parsetos(optarg, "tcp")) < 0)
+#ifdef	HAS_GETTOS
+			if ((num = parsetos(optarg, "tcp")) < 0) {
+#else
+			errno = 0;
+			num = strtol(optarg, 0, 0);
+			if (errno) {
+#endif
 				fprintf(stderr, "%s%s%s%s\n",
 					prompt, ": Bad TOS argument '",
 					optarg,
 					"; will try to use default TOS");
-#else
-			fprintf(stderr,
-			   "%s: Warning: -S ignored, no parsetos() support.\n",
-								prompt);
-#endif
+			} else
+				tos = num;
 		    }
 			break;
 		case 'X':
@@ -210,6 +235,9 @@ main(int argc, char *argv[])
 				"%s: -x ignored, no encryption support.\n",
 				prompt);
 			break;
+		case 'b':
+			srcaddr = optarg;
+			break;
 		case '?':
 		default:
 			usage();
@@ -232,6 +260,13 @@ main(int argc, char *argv[])
 		if (user) {
 			*argp++ = "-l";
 			*argp++ = user;
+		}
+		if (srcaddr) {
+			*argp++ = "-b";
+			*argp++ = srcaddr;
+		}
+		if (family) {
+			*argp++ = family == AF_INET ? "-4" : "-6";
 		}
 		*argp++ = argv[0];		/* host */
 		if (argc > 1)

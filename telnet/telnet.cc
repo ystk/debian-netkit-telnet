@@ -88,7 +88,8 @@ char	do_dont_resp[256];
 char	will_wont_resp[256];
 
 int
-eight = 0,
+  eight = 3,
+  binary = 0,
   autologin = 0,	/* Autologin anyone? */
   skiprc = 0,
   connected,
@@ -639,14 +640,14 @@ static const char *gettermname(void) {
   if (resettermname) {
     resettermname = 0;
     tname = env_getvalue("TERM", 0);
-    if (!tname || my_setupterm(tname, 1, &err)) {
+    if (!tname /* || my_setupterm(tname, 1, &err) */) {
       termbuf[0] = 0;
       tname = "UNKNOWN";
     }
     mklist(termbuf, tname, termtypes);
     next = 0;
   }
-  if (next==termtypes.num()) next = 0;
+  if (next==termtypes.num()-1) next = 0;
   return termtypes[next++];
 }
 /*
@@ -681,7 +682,7 @@ static void suboption(void) {
       }
 #endif /* TN3270 */
       name = gettermname();
-      netoring.printf("%c%c%c%c%s%c%c", IAC, SB, TELOPT_TTYPE,
+      netoring.xprintf("%c%c%c%c%s%c%c", IAC, SB, TELOPT_TTYPE,
 		      TELQUAL_IS, name, IAC, SE);
     }
     break;
@@ -693,7 +694,7 @@ static void suboption(void) {
     if (SB_GET() == TELQUAL_SEND) {
       long oospeed, iispeed;
       TerminalSpeeds(&iispeed, &oospeed);
-      netoring.printf("%c%c%c%c%ld,%ld%c%c", IAC, SB, TELOPT_TSPEED, 
+      netoring.xprintf("%c%c%c%c%ld,%ld%c%c", IAC, SB, TELOPT_TSPEED, 
 		      TELQUAL_IS, oospeed, iispeed, IAC, SE);
     }
     break;
@@ -780,7 +781,7 @@ static void suboption(void) {
 	send_wont(TELOPT_XDISPLOC, 1);
 	break;
       }
-      netoring.printf("%c%c%c%c%s%c%c", IAC, SB, TELOPT_XDISPLOC,
+      netoring.xprintf("%c%c%c%c%s%c%c", IAC, SB, TELOPT_XDISPLOC,
 		      TELQUAL_IS, dp, IAC, SE);
     }
     break;
@@ -798,7 +799,7 @@ void lm_will(unsigned char *cmd, int len) {
     return;
   }
   
-  netoring.printf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, 
+  netoring.xprintf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, 
 		  DONT, cmd[0], IAC, SE);
 }
 
@@ -815,7 +816,7 @@ void lm_do(unsigned char *cmd, int len) {
     /*@*/	printf("lm_do: no command!!!\n");	/* Should not happen... */
     return;
   }
-  netoring.printf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, 
+  netoring.xprintf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, 
 		  WONT, cmd[0], IAC, SE);
 }
 
@@ -838,7 +839,7 @@ void lm_mode(unsigned char *cmd, int len, int init) {
     k |= MODE_ACK;
   }
   
-  netoring.printf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, LM_MODE,
+  netoring.xprintf("%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE, LM_MODE,
 		  k, IAC, SE);
   
   setconnmode(0);	/* set changed mode */
@@ -933,11 +934,11 @@ void slc_mode_import(int def) {
 
 void slc_import(int def) {
   if (def) {
-    netoring.printf("%c%c%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE,
+    netoring.xprintf("%c%c%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE,
 		    LM_SLC, 0, SLC_DEFAULT, 0, IAC, SE);
   }
   else {
-    netoring.printf("%c%c%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE,
+    netoring.xprintf("%c%c%c%c%c%c%c%c%c", IAC, SB, TELOPT_LINEMODE,
 		    LM_SLC, 0, SLC_VARIABLE, 0, IAC, SE);
   }
 }
@@ -1050,6 +1051,7 @@ void slc_check(void) {
 
 
 unsigned char slc_reply[128];
+unsigned char const * const slc_reply_eom = &slc_reply[sizeof(slc_reply)];
 unsigned char *slc_replyp;
 
 void slc_start_reply(void) {
@@ -1061,6 +1063,14 @@ void slc_start_reply(void) {
 }
 
 void slc_add_reply(int func, int flags, int value) {
+  /* A sequence of up to 6 bytes my be written for this member of the SLC
+   * suboption list by this function.  The end of negotiation command,
+   * which is written by slc_end_reply(), will require 2 additional
+   * bytes.  Do not proceed unless there is sufficient space for these
+   * items.
+   */
+  if (&slc_replyp[6+2] > slc_reply_eom)
+    return;
   if ((*slc_replyp++ = func) == IAC)
     *slc_replyp++ = IAC;
   if ((*slc_replyp++ = flags) == IAC)
@@ -1142,6 +1152,7 @@ void env_opt(unsigned char *buf, int len) {
   }
 }
 
+/* OPT_REPLY_SIZE must be a multiple of 2. */
 #define	OPT_REPLY_SIZE	256
 unsigned char *opt_reply;
 unsigned char *opt_replyp;
@@ -1173,6 +1184,7 @@ void env_opt_start_info(void) {
 
 void env_opt_add(const char *ep) {
   const char *vp;
+  const unsigned char *tp;
   unsigned char c;
   
   if (opt_reply == NULL)		/*XXX*/
@@ -1185,11 +1197,12 @@ void env_opt_add(const char *ep) {
     return;
   }
   vp = env_getvalue(ep, 1);
-  if (opt_replyp + (vp ? strlen(vp) : 0) + strlen(ep) + 6 > opt_replyend)
+  tp = opt_replyp + (vp ? strlen(vp) * 2 : 0) + strlen(ep) * 2 + 6;
+  if (tp > opt_replyend)
     {
       register int len;
-      opt_replyend += OPT_REPLY_SIZE;
-      len = opt_replyend - opt_reply;
+      len = ((tp - opt_reply) + OPT_REPLY_SIZE - 1) & ~(OPT_REPLY_SIZE - 1);
+      opt_replyend = opt_reply + len;
       opt_reply = (unsigned char *)realloc(opt_reply, len);
       if (opt_reply == NULL) {
 	/*@*/			printf("env_opt_add: realloc() failed!!!\n");
@@ -1740,8 +1753,8 @@ void telnet(const char * /*user*/) {
     send_do(TELOPT_STATUS, 1);
     if (env_getvalue("DISPLAY", 0))
       send_will(TELOPT_XDISPLOC, 1);
-    if (eight)
-      tel_enter_binary(eight);
+    if (binary)
+      tel_enter_binary(binary);
   }
 #endif /* !defined(TN3270) */
   

@@ -41,8 +41,6 @@ char st_rcsid[] =
 
 #include "telnetd.h"
 #include "pathnames.h"
-#include "logout.h"
-#include "logwtmp.h"
 
 #if defined(__GLIBC__) && (__GLIBC__ >= 2)
 /* mmm, nonstandard */
@@ -206,17 +204,17 @@ int spcset(int func, cc_t *valp, cc_t **valpp) {
  *
  * Returns the file descriptor of the opened pty.
  */
-static char linedata[PATH_MAX];
-char *line = linedata;
+const char *line;
 
 static int ptyslavefd=-1;
 
 int getpty(void) {
     int masterfd;
 
-    if (openpty(&masterfd, &ptyslavefd, line, NULL, NULL)) {
+    if (openpty(&masterfd, &ptyslavefd, NULL, NULL, NULL)) {
 	return -1;
     }
+    line = ttyname(ptyslavefd);
     return masterfd;
 }
 
@@ -681,7 +679,9 @@ void start_login(const char *host, int autologin, const char *name) {
     memcpy(&argvfoo, &avs.argv, sizeof(argvfoo));
     execv(loginprg, argvfoo);
 
+    openlog("telnetd", LOG_PID | LOG_ODELAY, LOG_DAEMON);
     syslog(LOG_ERR, "%s: %m\n", loginprg);
+    closelog();
     fatalperror(net, loginprg);
 }
 
@@ -720,25 +720,11 @@ static void addarg(struct argv_stuff *avs, const char *val) {
  * clean up anything that needs to be cleaned up.
  */
 void cleanup(int sig) {
-    char *p;
+    const char *p;
     (void)sig;
 
     p = line + sizeof("/dev/") - 1;
     if (logout(p)) logwtmp(p, "", "");
-#ifdef PARANOID_TTYS
-    /*
-     * dholland 16-Aug-96 chmod the tty when not in use
-     * This will make it harder to attach unwanted stuff to it
-     * (which is a security risk) but will break some programs.
-     */
-    chmod(line, 0600);
-#else
-    chmod(line, 0666);
-#endif
-    chown(line, 0, 0);
-    *p = 'p';
-    chmod(line, 0666);
-    chown(line, 0, 0);
     shutdown(net, 2);
     exit(0);
 }

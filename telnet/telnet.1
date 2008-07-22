@@ -42,8 +42,9 @@
 protocol
 .Sh SYNOPSIS
 .Nm telnet
-.Op Fl 8ELadr
+.Op Fl 468ELadr
 .Op Fl S Ar tos
+.Op Fl b Ar address
 .Op Fl e Ar escapechar
 .Op Fl l Ar user
 .Op Fl n Ar tracefile
@@ -68,6 +69,10 @@ command implicitly; see the description below.
 .Pp
 Options:
 .Bl -tag -width indent
+.It Fl 4
+Force IPv4 address resolution.
+.It Fl 6
+Force IPv6 address resolution.
 .It Fl 8
 Request 8-bit operation. This causes an attempt to negotiate the
 .Dv TELNET BINARY
@@ -89,6 +94,8 @@ of the
 option if supported by the remote system. The username is retrieved
 via
 .Xr getlogin 3 .
+.It Fl b Ar address
+Use bind(2) on the local socket to bind it to a specific local address.
 .It Fl d
 Sets the initial value of the
 .Ic debug
@@ -474,17 +481,29 @@ protocol without making a mess. Protocol negotiation can be forced by
 placing a dash before the port number.
 .Pp
 After establishing a connection, any commands associated with the
-remote host in the user's
+remote host in
+.Pa /etc/telnetrc
+and the user's
 .Pa .telnetrc
-file are executed.
+file are executed, in that order.
 .Pp
-The format of the .telnetrc file is as follows: Lines beginning with a
+The format of the telnetrc files is as follows: Lines beginning with a
 #, and blank lines, are ignored.  The rest of the file should consist
 of hostnames and sequences of
 .Nm telnet
 commands to use with that host. Commands should be one per line,
 indented by whitespace; lines beginning without whitespace are
-interpreted as hostnames. Upon connecting to a particular host, the
+interpreted as hostnames.  Lines beginning with the special hostname
+.Ql DEFAULT
+will apply to all hosts.  Hostnames including
+.Ql DEFAULT
+may be followed immediately by a colon and a port number or string.
+If a port is specified it must match exactly with what is specified
+on the command line.  If no port was specified on the command line,
+then the value
+.Ql telnet
+is used.
+Upon connecting to a particular host, the
 commands associated with that host are executed.
 .It Ic quit
 Close any open session and exit
@@ -1184,9 +1203,7 @@ escape sequences are preceded by a '*' to aid in locating them.
 When the skiprc toggle is
 .Dv TRUE ,
 .Tn telnet
-does not read the 
-.Pa \&.telnetrc
-file.  The initial value for this toggle is
+does not read the telnetrc files.  The initial value for this toggle is
 .Dv FALSE.
 .It Ic termdata
 Toggles the display of all terminal data (in hexadecimal format).
@@ -1239,7 +1256,9 @@ to the other side via the
 .Dv TELNET ENVIRON
 option.
 .Sh FILES
-.Bl -tag -width ~/.telnetrc -compact
+.Bl -tag -width /etc/telnetrc -compact
+.It Pa /etc/telnetrc
+global telnet startup values
 .It Pa ~/.telnetrc
 user customized telnet startup values
 .El

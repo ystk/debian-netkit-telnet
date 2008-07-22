@@ -43,12 +43,16 @@ char telnetd_rcsid[] =
 
 #include "../version.h"
 
+#include <sys/socket.h>
 #include <netdb.h>
 #include <termcap.h>
 #include <netinet/in.h>
 /* #include <netinet/ip.h> */ /* Don't think this is used at all here */
 #include <arpa/inet.h>
 #include <assert.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "telnetd.h"
 #include "pathnames.h"
 #include "setproctitle.h"
@@ -68,7 +72,7 @@ int	require_SecurID = 0;
 #define HAS_IPPROTO_IP
 #endif
 
-static void doit(struct sockaddr_in *who);
+static void doit(struct sockaddr *who, socklen_t who_len);
 static int terminaltypeok(const char *s);
 
 /*
@@ -82,15 +86,119 @@ int	hostinfo = 1;			/* do we print login banner? */
 
 int debug = 0;
 int keepalive = 1;
+#ifdef LOGIN_WRAPPER
+char *loginprg = LOGIN_WRAPPER;
+#else
 char *loginprg = _PATH_LOGIN;
-char *progname;
+#endif
 
 extern void usage(void);
+
+static void
+wait_for_connection(const char *service)
+{
+	struct addrinfo hints;
+	struct addrinfo *res, *addr;
+	struct pollfd *fds, *fdp;
+	int nfds;
+	int i;
+	int error;
+	int on = 1;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = PF_UNSPEC;
+	hints.ai_flags = AI_PASSIVE;
+	hints.ai_socktype = SOCK_STREAM;
+	error = getaddrinfo(NULL, service, &hints, &res);
+	if (error) {
+		char *p;
+		error = asprintf(&p, "getaddrinfo: %s\n", gai_strerror(error));
+		fatal(2, error >= 0 ? p : "");
+	}
+
+	for (addr = res, nfds = 0; addr; addr = addr->ai_next, nfds++)
+		;
+	fds = malloc(sizeof(struct pollfd) * nfds);
+	for (addr = res, fdp = fds; addr; addr = addr->ai_next, fdp++) {
+		int s;
+
+		if (addr->ai_family == AF_LOCAL) {
+nextaddr:
+			fdp--;
+			nfds--;
+			continue;
+		}
+
+		s = socket(addr->ai_family, SOCK_STREAM, 0);
+		if (s < 0) {
+			if (errno == EAFNOSUPPORT || errno == EINVAL) {
+				goto nextaddr;
+			}
+			fatalperror(2, "socket");
+		}
+		if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) {
+			fatalperror(2, "setsockopt");
+		}
+		if (bind(s, addr->ai_addr, addr->ai_addrlen)) {
+#ifdef linux
+			if (fdp != fds && errno == EADDRINUSE) {
+				close(s);
+				goto nextaddr;
+			}
+#endif
+			fatalperror(2, "bind");
+		}
+		if (listen(s, 1)) {
+			fatalperror(2, "listen");
+		}
+		if (fcntl(s, F_SETFL, O_NONBLOCK)) {
+			fatalperror(2, "fcntl");
+		}
+
+		fdp->fd = s;
+		fdp->events = POLLIN;
+	}
+
+	freeaddrinfo(res);
+
+	while (1) {
+		if (poll(fds, nfds, -1) < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			fatalperror(2, "poll");
+		}
+
+		for (i = 0, fdp = fds; i < nfds; i++, fdp++) {
+			int fd;
+
+			if (!(fdp->revents & POLLIN)) {
+				continue;
+			}
+
+			fd = accept(fdp->fd, 0, 0);
+			if (fd >= 0) {
+				dup2(fd, 0);
+				close(fd);
+				goto out;
+			}
+			if (errno != EAGAIN) {
+				fatalperror(2, "accept");
+			}
+		}
+	}
+
+out:
+	for (i = 0, fdp = fds; i < nfds; i++, fdp++) {
+		close(fdp->fd);
+	}
+	free(fds);
+}
 
 int
 main(int argc, char *argv[], char *env[])
 {
-	struct sockaddr_in from;
+	struct sockaddr_storage from;
 	int on = 1;
 	socklen_t fromlen;
 	register int ch;
@@ -103,12 +211,6 @@ main(int argc, char *argv[], char *env[])
 
 	pfrontp = pbackp = ptyobuf;
 	netip = netibuf;
-	nfrontp = nbackp = netobuf;
-#if	defined(ENCRYPT)
-	nclearto = 0;
-#endif
-
-	progname = *argv;
 
 	while ((ch = getopt(argc, argv, "d:a:e:lhnr:I:D:B:sS:a:X:L:")) != EOF) {
 		switch(ch) {
@@ -249,74 +351,18 @@ main(int argc, char *argv[], char *env[])
 	argv += optind;
 
 	if (debug) {
-	    int s, ns;
-	    socklen_t foo;
-	    struct servent *sp;
-	    struct sockaddr_in sn;
-
-	    memset(&sn, 0, sizeof(sn));
-	    sn.sin_family = AF_INET;
-
-	    if (argc > 1) {
-		usage();
-		/* NOTREACHED */
-	    } else if (argc == 1) {
-		    if ((sp = getservbyname(*argv, "tcp"))!=NULL) {
-			sn.sin_port = sp->s_port;
-		    } 
-		    else {
-			int pt = atoi(*argv);
-			if (pt <= 0) {
-			    fprintf(stderr, "telnetd: %s: bad port number\n",
-				    *argv);
-			    usage();
-			    /* NOTREACHED */
-			}
-			sn.sin_port = htons(pt);
-		   }
-	    } else {
-		sp = getservbyname("telnet", "tcp");
-		if (sp == 0) {
-		    fprintf(stderr, "telnetd: tcp/telnet: unknown service\n");
-		    exit(1);
+		if (argc > 1) {
+			usage();
+			/* NOTREACHED */
 		}
-		sn.sin_port = sp->s_port;
-	    }
 
-	    s = socket(AF_INET, SOCK_STREAM, 0);
-	    if (s < 0) {
-		    perror("telnetd: socket");;
-		    exit(1);
-	    }
-	    (void) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-	    if (bind(s, (struct sockaddr *)&sn, sizeof(sn)) < 0) {
-		perror("bind");
-		exit(1);
-	    }
-	    if (listen(s, 1) < 0) {
-		perror("listen");
-		exit(1);
-	    }
-	    foo = sizeof(sn);
-	    ns = accept(s, (struct sockaddr *)&sn, &foo);
-	    if (ns < 0) {
-		perror("accept");
-		exit(1);
-	    }
-	    (void) dup2(ns, 0);
-	    (void) close(ns);
-	    (void) close(s);
-	} else if (argc > 0) {
-		usage();
-		/* NOT REACHED */
+		wait_for_connection((argc == 1) ? *argv : "telnet");
 	}
 
 	openlog("telnetd", LOG_PID | LOG_ODELAY, LOG_DAEMON);
 	fromlen = sizeof (from);
 	if (getpeername(0, (struct sockaddr *)&from, &fromlen) < 0) {
-		fprintf(stderr, "%s: ", progname);
-		perror("getpeername");
-		_exit(1);
+		fatalperror(2, "getpeername");
 	}
 	if (keepalive &&
 	    setsockopt(0, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof (on)) < 0) {
@@ -339,7 +385,8 @@ main(int argc, char *argv[], char *env[])
 	}
 #endif	/* defined(HAS_IPPROTO_IP) && defined(IP_TOS) */
 	net = 0;
-	doit(&from);
+	netopen();
+	doit((struct sockaddr *)&from, fromlen);
 	/* NOTREACHED */
 	return 0;
 }  /* end of main */
@@ -354,7 +401,7 @@ usage(void)
 #ifdef BFTPDAEMON
 	fprintf(stderr, " [-B]");
 #endif
-	fprintf(stderr, " [-debug]");
+	fprintf(stderr, " [-debug port]");
 #ifdef DIAGNOSTICS
 	fprintf(stderr, " [-D (options|report|exercise|netdata|ptydata)]\n\t");
 #endif
@@ -373,7 +420,7 @@ usage(void)
 #ifdef	AUTHENTICATE
 	fprintf(stderr, " [-X auth-type]");
 #endif
-	fprintf(stderr, " [port]\n");
+	fprintf(stderr, "\n");
 	exit(1);
 }
 
@@ -608,54 +655,45 @@ extern void telnet(int, int);
  * Get a pty, scan input lines.
  */
 static void
-doit(struct sockaddr_in *who)
+doit(struct sockaddr *who, socklen_t who_len)
 {
 	const char *host;
-	struct hostent *hp;
 	int level;
 	char user_name[256];
+	int i;
+	struct addrinfo hints, *res;
 
 	/*
 	 * Find an available pty to use.
 	 */
 	pty = getpty();
 	if (pty < 0)
-		fatal(net, "All network ports in use");
+		fatalperror(net, "getpty");
 
 	/* get name of connected client */
-	hp = gethostbyaddr((char *)&who->sin_addr, sizeof (struct in_addr),
-		who->sin_family);
-	if (hp)
-		host = hp->h_name;
-	else
-		host = inet_ntoa(who->sin_addr);
+	if (getnameinfo(who, who_len, remote_host_name,
+			sizeof(remote_host_name), 0, 0, 0)) {
+		syslog(LOG_ERR, "doit: getnameinfo: %m");
+		*remote_host_name = 0;
+        }
 
-	/*
-	 * We must make a copy because Kerberos is probably going
-	 * to also do a gethost* and overwrite the static data...
-	 */
-	{
-		int i;
-		strncpy(remote_host_name, host, sizeof(remote_host_name)-1);
-		remote_host_name[sizeof(remote_host_name)-1] = 0;
-
-		/* Disallow funnies. */
-		for (i=0; remote_host_name[i]; i++) {
-		    if (remote_host_name[i]<=32 || remote_host_name[i]>126) 
-			remote_host_name[i] = '?';
-		}
+	/* Disallow funnies. */
+	for (i=0; remote_host_name[i]; i++) {
+	    if (remote_host_name[i]<=32 || remote_host_name[i]>126) 
+		remote_host_name[i] = '?';
 	}
 	host = remote_host_name;
 
 	/* Get local host name */
-	{
-		struct hostent *h;
-		gethostname(host_name, sizeof(host_name));
-		h = gethostbyname(host_name);
-		if (h) {
-		    strncpy(host_name, h->h_name, sizeof(host_name));
-		    host_name[sizeof(host_name)-1] = 0;
-		}
+	gethostname(host_name, sizeof(host_name));
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = PF_UNSPEC;
+	hints.ai_flags = AI_CANONNAME;
+	if ((i = getaddrinfo(host_name, 0, &hints, &res)))
+		syslog(LOG_WARNING, "doit: getaddrinfo: %s", gai_strerror(i));
+	else {
+		strncpy(host_name, res->ai_canonname, sizeof(host_name)-1);
+		host_name[sizeof(host_name)-1] = 0;
 	}
 
 #if	defined(AUTHENTICATE) || defined(ENCRYPT)
@@ -892,7 +930,7 @@ void telnet(int f, int p)
 	 * Never look for input if there's still
 	 * stuff in the corresponding output buffer
 	 */
-	if (nfrontp - nbackp || pcc > 0) {
+	if (netbuflen(1) || pcc > 0) {
 	    FD_SET(f, &obits);
 	    if (f >= hifd) hifd = f+1;
 	} 
@@ -1033,6 +1071,7 @@ void telnet(int f, int p)
 		}
 #endif	/* LINEMODE */
 		if (ptyibuf[0] & TIOCPKT_FLUSHWRITE) {
+		    static const char msg[] = { IAC, DM };
 		    netclear();	/* clear buffer back */
 #ifndef	NO_URGENT
 		    /*
@@ -1041,8 +1080,7 @@ void telnet(int f, int p)
 		     * royally if we send them urgent
 		     * mode data.
 		     */
-		    netoprintf("%c%c", IAC, DM);
-		    neturg = nfrontp-1; /* off by one XXX */
+		    sendurg(msg, sizeof(msg));
 #endif
 		}
 		if (his_state_is_will(TELOPT_LFLOW) &&
@@ -1058,23 +1096,21 @@ void telnet(int f, int p)
 	    }
 	}
 	
-	while (pcc > 0) {
-	    if ((&netobuf[BUFSIZ] - nfrontp) < 2)
-		break;
+	while (pcc > 0 && !netbuflen(0)) {
 	    c = *ptyip++ & 0377, pcc--;
 	    if (c == IAC)
-		*nfrontp++ = c;
-	    *nfrontp++ = c;
+		putc(c, netfile);
+	    putc(c, netfile);
 	    if ((c == '\r'  ) && (my_state_is_wont(TELOPT_BINARY))) {
 		if (pcc > 0 && ((*ptyip & 0377) == '\n')) {
-		    *nfrontp++ = *ptyip++ & 0377;
+		    putc(*ptyip++ & 0377, netfile);
 		    pcc--;
 		} 
-		else *nfrontp++ = '\0';
+		else putc('\0', netfile);
 	    }
 	}
 
-	if (FD_ISSET(f, &obits) && (nfrontp - nbackp) > 0)
+	if (FD_ISSET(f, &obits))
 	    netflush();
 	if (ncc > 0)
 	    telrcv();

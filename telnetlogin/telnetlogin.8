@@ -40,6 +40,7 @@
 .Nm telnetlogin
 .Op Fl h Ar host
 .Op Fl p
+.Op Ar username
 .Sh DESCRIPTION
 .Nm telnetlogin
 is a setuid wrapper that runs
@@ -62,10 +63,8 @@ shown above, in the order listed. This is the order
 .Nm telnetd 8
 normally provides them in.
 .Nm telnetlogin
-also only accepts the environment variables
+also does sanity checks on the environment variables
 .Ev TERM , 
-.Ev DISPLAY , 
-.Ev POSIXLY_CORRECT ,
 and
 .Ev REMOTEHOST .
 It also insists that the standard input, output, and error streams are
@@ -83,7 +82,7 @@ login.
 .Nm telnetlogin
 does not permit the
 .Fl f
-option to login, and does not permit passing a username, so will not
+option to login, so will not
 work with telnetds that perform authentication via Kerberos or SSL.
 .Pp
 THIS IS PRESENTLY EXPERIMENTAL CODE; USE WITH CAUTION.

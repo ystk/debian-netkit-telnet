@@ -13,7 +13,7 @@ int TerminalWindowSize(long *rows, long *cols);
 void auth_encrypt_user(char *);
 void auth_name(unsigned char *, int);
 void auth_printsub(unsigned char *, int, unsigned char *, int);
-void cmdrc(const char *m1, const char *m2);
+void cmdrc(const char *, const char *, const char *);
 void env_init(void);
 int getconnmode(void);
 void init_network(void);

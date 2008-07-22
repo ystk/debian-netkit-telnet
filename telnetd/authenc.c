@@ -42,18 +42,6 @@ net_write(str, len)
     return(0);
 }
 
-void
-net_encrypt()
-{
-#if	defined(ENCRYPT)
-    char *s = (nclearto > nbackp) ? nclearto : nbackp;
-    if (s < nfrontp && encrypt_output) {
-	(*encrypt_output)((unsigned char *)s, nfrontp - s);
-    }
-    nclearto = nfrontp;
-#endif
-}
-
 int
 telnet_spin()
 {

@@ -11,7 +11,7 @@ telnetlogin: $(OBJS)
 $(OBJS): ../version.h
 
 install: telnetlogin
-	install -s -m4750 -oroot -gtelnetd telnetlogin $(INSTALLROOT)$(SBINDIR)
+	install -m4750 -oroot -gtelnetd telnetlogin $(INSTALLROOT)$(SBINDIR)
 	install -m$(MANMODE) telnetlogin.8 $(INSTALLROOT)$(MANDIR)/man8
 
 clean:

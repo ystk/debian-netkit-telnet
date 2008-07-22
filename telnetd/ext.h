@@ -81,22 +81,21 @@ extern char *loginprg;
  */
 extern char ptyobuf[BUFSIZ+NETSLOP], *pfrontp, *pbackp;
 extern char netibuf[BUFSIZ], *netip;
-extern char netobuf[BUFSIZ+NETSLOP], *nfrontp, *nbackp;
-extern char *neturg;		/* one past last byte of urgent data */
 extern int pcc, ncc;
+extern FILE *netfile;
 
 /* printf into netobuf */
-void netoprintf(const char *fmt, ...) __attribute((format (printf, 1, 2))); 
+#define netoprintf(fmt, ...) fprintf(netfile, fmt, ## __VA_ARGS__)
 
 extern int pty, net;
-extern char *line;
+extern const char *line;
 extern int SYNCHing;		/* we are in TELNET SYNCH mode */
 
 void _termstat(void);
 void add_slc(int, int, int);
 void check_slc(void);
 void change_slc(int, int, int);
-void cleanup(int);
+void cleanup(int) __attribute__ ((noreturn));
 void clientstat(int, int, int);
 void copy_termbuf(char *, int);
 void deferslc(void);
@@ -106,8 +105,8 @@ void doeof(void);
 void dooption(int);
 void dontoption(int);
 void edithost(const char *, const char *);
-void fatal(int, const char *);
-void fatalperror(int, const char *);
+void fatal(int, const char *) __attribute__ ((noreturn));
+void fatalperror(int, const char *) __attribute__ ((noreturn));
 void get_slc_defaults(void);
 void init_env(void);
 void init_termbuf(void);
@@ -115,6 +114,8 @@ void interrupt(void);
 void localstat(void);
 void netclear(void);
 void netflush(void);
+size_t netbuflen(int);
+void sendurg(const char *, size_t);
 
 #ifdef DIAGNOSTICS
 void printoption(const char *, int);
@@ -182,10 +183,11 @@ void tty_setsofttab(int);
 void tty_tspeed(int);
 void willoption(int);
 void wontoption(int);
-void writenet(unsigned char *, int);
+#define writenet(b, l) fwrite(b, 1, l, netfile)
+void netopen(void);
 
 #if defined(ENCRYPT)
-extern void (*encrypt_output)(unsigned char *, int);
+extern void (*encrypt_output)(const unsigned char *, int);
 extern int (*decrypt_input)(int);
 extern char *nclearto;
 #endif

@@ -48,9 +48,7 @@
 typedef unsigned char cc_t;
 #endif
 
-#ifdef __linux__
 #include <unistd.h>   /* get _POSIX_VDISABLE */
-#endif
 
 #ifndef	_POSIX_VDISABLE
 #error "Please fix externs.h to define _POSIX_VDISABLE"
@@ -60,7 +58,8 @@ typedef unsigned char cc_t;
 
 extern int autologin;		/* Autologin enabled */
 extern int skiprc;		/* Don't process the ~/.telnetrc file */
-extern int eight;		/* use eight bit mode (binary in and/or out */
+extern int eight;		/* use eight bit mode (binary in and/or out) */
+extern int binary;		/* use binary option (in and/or out) */
 extern int flushout;		/* flush output */
 extern int connected;		/* Are we connected to the other side? */
 extern int globalmode;		/* Mode tty should be in */
@@ -225,6 +224,8 @@ cc_t *tcval(int);
 
 //#if 0
 extern struct termios new_tc;
+extern struct termios old_tc;
+
 
 #define termEofChar		new_tc.c_cc[VEOF]
 #define termEraseChar		new_tc.c_cc[VERASE]

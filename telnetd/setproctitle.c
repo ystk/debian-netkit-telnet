@@ -139,7 +139,7 @@ setproctitle(const char *fmt, ...)
 	(void) strcpy(Argv[0], buf);
 	p = &Argv[0][i];
 	while (p < LastArgv)
-		*p++ = ' ';
+		*p++ = '\0';
 	Argv[1] = NULL;
 }
 

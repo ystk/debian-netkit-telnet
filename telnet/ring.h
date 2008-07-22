@@ -83,7 +83,7 @@ class ringbuf {
     // manual supply
     void putch(char c) { write(&c, 1); }
     void write(const char *buffer, int ct);
-    void printf(const char *format, ...);
+    void xprintf(const char *format, ...);
     int empty_count() { return size - count; }
 
     // automatic supply

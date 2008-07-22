@@ -161,7 +161,7 @@ login has been completed.
 .It Fl L Ar loginprg
 This option may be used to specify a different login program.
 By default, 
-.Pa /bin/login
+.Pa /usr/lib/telnetlogin
 is used.
 .It Fl n
 Disable
@@ -406,6 +406,7 @@ is compiled with support for data encryption, and
 indicates a willingness to decrypt
 the data stream.
 .Xr issue.net 5 ) .
+.El
 .Sh FILES
 .Pa /etc/services ,
 .Pa /etc/issue.net
@@ -458,6 +459,7 @@ Telnet Authentication: SPX
 Telnet Environment Option Interoperability Issues
 .It Cm RFC-1572
 Telnet Environment Option
+.El
 .Sh BUGS
 Some
 .Tn TELNET

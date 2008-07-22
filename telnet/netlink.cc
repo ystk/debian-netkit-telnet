@@ -79,22 +79,61 @@ void netlink::close(int doshutdown) {
 	shutdown(net, 2);
     }
     ::close(net);
+    net = -1;
 }
 
-int netlink::connect(int debug, struct hostent *host, 
-		     struct sockaddr_in *sn, 
+int netlink::bind(struct addrinfo *addr)
+{
+    int res;
+
+    res = socket(addr->ai_family);
+    if (res < 2) {
+	if (res == 1)
+	    perror("telnet: socket");
+	return -1;
+    }
+
+    if (::bind(net, addr->ai_addr, addr->ai_addrlen) < 0) {
+	perror("telnet: bind");
+	return -1;
+    }
+
+    return 0;
+}
+
+int netlink::socket(int family)
+{
+    if (this->family != family)
+	close(0);
+
+    if (net < 0) {
+	this->family = family;
+	net = ::socket(family, SOCK_STREAM, 0);
+	if (net < 0) {
+	    if (errno == EAFNOSUPPORT)
+		return 1;
+	    perror("telnet: socket");
+	    return 0;
+	}
+    }
+
+    return 2;
+}
+
+int netlink::connect(int debug, struct addrinfo *addr, 
 		     char *srcroute, int srlen, int tos) 
 {
     int on=1;
+    int res;
 
-    net = socket(AF_INET, SOCK_STREAM, 0);
-    if (net < 0) {
-	perror("telnet: socket");
-	return 0;
-    }
+    res = socket(addr->ai_family);
+    if (res < 2)
+	return res;
 
 #if defined(IP_OPTIONS) && defined(HAS_IPPROTO_IP)
     if (srcroute) {
+	if (addr->ai_family != AF_INET)
+	    fputs("Source route is only supported for IPv4\n", stderr);
 	if (setsockopt(net, IPPROTO_IP, IP_OPTIONS, srcroute, srlen) < 0)
 	    perror("setsockopt (IP_OPTIONS)");
     }
@@ -108,7 +147,7 @@ int netlink::connect(int debug, struct hostent *host,
 #endif
     if (tos < 0) tos = 020;	/* Low Delay bit */
     if (tos && (setsockopt(net, IPPROTO_IP, IP_TOS, &tos, sizeof(int)) < 0)
-	&& (errno != ENOPROTOOPT))
+	&& (errno != ENOPROTOOPT) && (errno != EOPNOTSUPP))
 	perror("telnet: setsockopt (IP_TOS) (ignored)");
 #endif	/* defined(IPPROTO_IP) && defined(IP_TOS) */
 
@@ -116,27 +155,8 @@ int netlink::connect(int debug, struct hostent *host,
 	perror("setsockopt (SO_DEBUG)");
     }
     
-    if (::connect(net, (struct sockaddr *)sn, sizeof(*sn)) < 0) {
-#if defined(h_addr)		/* In 4.3, this is a #define */
-	if (host && host->h_addr_list[1]) {
-	    int oerrno = errno;
-	    
-	    fprintf(stderr, "telnet: connect to address %s: ",
-		    inet_ntoa(sn->sin_addr));
-	    errno = oerrno;
-	    perror(NULL);
-	    host->h_addr_list++;
-	    if (host->h_length > (int)sizeof(sn->sin_addr)) {
-		host->h_length = sizeof(sn->sin_addr);
-	    }
-	    memcpy(&sn->sin_addr, host->h_addr_list[0], host->h_length);
-	    close(net);
-	    return 1;
-	}
-#endif	/* defined(h_addr) */
-
-	perror("telnet: Unable to connect to remote host");
-	return 0;
+    if (::connect(net, addr->ai_addr, addr->ai_addrlen) < 0) {
+	return 1;
     }
     return 2;
 }

@@ -189,18 +189,25 @@ void NetSetPgrp(int fd) {
  * Various signal handling routines.
  */
 
+#if 0
 static void deadpeer(int /*sig*/) {
     setcommandmode();
     siglongjmp(peerdied, -1);
 }
+#endif
 
 static void intr(int /*sig*/) {
     if (localchars) {
 	intp();
     }
     else {
+#if 0
         setcommandmode();
 	siglongjmp(toplevel, -1);
+#else
+	signal(SIGINT, SIG_DFL);
+	raise(SIGINT);
+#endif
     }
 }
 
@@ -214,6 +221,8 @@ static void intr2(int /*sig*/) {
 	    sendabort();
 	return;
     }
+    signal(SIGQUIT, SIG_DFL);
+    raise(SIGQUIT);
 }
 
 #ifdef	SIGWINCH
@@ -238,7 +247,9 @@ void ayt(int sig) {
 void sys_telnet_init(void) {
     signal(SIGINT, intr);
     signal(SIGQUIT, intr2);
+#if 0
     signal(SIGPIPE, deadpeer);
+#endif
 #ifdef	SIGWINCH
     signal(SIGWINCH, sendwin);
 #endif
